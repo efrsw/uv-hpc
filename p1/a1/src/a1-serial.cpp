@@ -1,7 +1,12 @@
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <format>
 #include <iostream>
+#include <iterator>
 #include <mpi.h>
+#include <stdexcept>
+#include <string>
 
 #include "../include/a1-helpers.hpp"
 
@@ -21,7 +26,41 @@ int main(int argc, char **argv) {
     process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
 
     // Note that you need to initialize MPI first
+    int numprocs, rank;
+    int tag = 0;
 
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &numprocs);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    MPI_Datatype row_type, col_type, col_matrix_type, row_2_type;
+
+    MPI_Type_vector(1, 4, 4, MPI_DOUBLE, &row_type);
+    MPI_Type_vector(4, 1, 4, MPI_DOUBLE, &col_type);
+    MPI_Type_vector(1, 1, 1, MPI_DOUBLE, &row_2_type);
+    MPI_Type_create_hvector(4, 1, sizeof(double), col_type, &col_matrix_type);
+
+    MPI_Type_commit(&row_type);
+    MPI_Type_commit(&row_2_type);
+    MPI_Type_commit(&col_type);
+    MPI_Type_commit(&col_matrix_type);
+
+    if (rank == 0) {
+        double matrix[4][4] = {{00, 01, 02, 03},
+                               {10, 11, 12, 13},
+                               {20, 21, 22, 23},
+                               {30, 31, 32, 33}};
+
+        MPI_Send(matrix, 4, row_2_type, 1, tag, MPI_COMM_WORLD);
+    } else if (rank == 1) {
+        double matrix[4][4] = {};
+        MPI_Status recv_status;
+        MPI_Recv(matrix, 1, col_matrix_type, 0, 0, MPI_COMM_WORLD,
+                 &recv_status);
+        print_double_array(matrix, 4, 4, 0);
+    }
+
+    /*
     auto time_compute_1 =
         chrono::high_resolution_clock::now(); // change to MPI_Wtime()
 
@@ -31,9 +70,11 @@ int main(int argc, char **argv) {
 
     // You can also use Mat data struct (see helpers), in which case you
     // allocate like: Mat U(M, N) and then use it like a regular 2D array
-    double **U = allocate(
-        M, N); // to change: use local sizes with MPI, i.e., recalculate M and N
-    double **W = allocate(M, N); // to change: same as with the U matrix
+
+    // TODO: use local sizes with MPI, i.e., recalculate M and N
+    auto U = Mat(M, N);
+    // TODO: same as with the U matrix
+    auto W = Mat(M, N);
 
     // Init & Boundary
     for (j = 0; j < M; ++j) {
@@ -113,10 +154,10 @@ int main(int argc, char **argv) {
                chrono::duration<double>(time_compute_2 - time_compute_1).count()
         << " seconds." << endl;
 
-    deallocate(U);
-    deallocate(W);
+    */
 
     // do not forget to call MPI_Finalize()
+    MPI_Finalize();
 
-    return 0;
+    return EXIT_SUCCESS;
 }

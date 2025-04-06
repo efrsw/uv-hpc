@@ -25,6 +25,39 @@ void deallocate(double **data) {
 }
 
 /**
+ * Print a 2D array of doubles in a formatted way to standard output
+ *
+ * @param arr The 2D array to print
+ * @param rows Number of rows in the array
+ * @param cols Number of columns in the array
+ * @param precision Number of decimal places to show (default: 6)
+ */
+void print_double_array(double **arr, int rows, int cols, int precision = 5) {
+    if (!arr)
+        return;
+
+    for (int i = -2; i < rows; ++i) {
+        for (int j = -2; j < cols; ++j) {
+            std::cout << std::fixed << std::setprecision(precision)
+                      << std::setw(precision + 3) << arr[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+// Overloaded version that accepts fixed-size 2D arrays
+void print_double_array(double arr[4][4], int rows, int cols,
+                        int precision = 5) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            std::cout << std::fixed << std::setprecision(precision)
+                      << std::setw(precision + 3) << arr[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+/**
  * Matrix data structure
  * 2D => (y-dim, x-dim)
  * Init:
