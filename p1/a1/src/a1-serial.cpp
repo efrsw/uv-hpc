@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -5,60 +6,226 @@
 #include <iostream>
 #include <iterator>
 #include <mpi.h>
-#include <stdexcept>
-#include <string>
+#include <numeric>
 
 #include "../include/a1-helpers.hpp"
 
 using namespace std;
 
+/**
+ * Position of subgrid inside topology
+ */
+enum SUBGRID_LOCATION {
+    TOP_LEFT = 0,
+    TOP_EDGE = 1,
+    TOP_RIGHT = 2,
+    RIGHT_EDGE = 3,
+    BOTTOM_RIGHT = 4,
+    BOTTOM_EDGE = 5,
+    LEFT_EDGE = 6,
+    BOTTOM_LEFT = 7,
+    INTERIOR = 8
+};
+
+SUBGRID_LOCATION get_subgrid_location(int up, int down, int left, int right) {
+    SUBGRID_LOCATION location;
+
+    if (left != MPI_PROC_NULL && right != MPI_PROC_NULL &&
+        up != MPI_PROC_NULL && down != MPI_PROC_NULL) {
+        location = INTERIOR;
+    } else if (up == MPI_PROC_NULL && left == MPI_PROC_NULL) {
+        location = TOP_LEFT;
+    } else if (up == MPI_PROC_NULL && right == MPI_PROC_NULL) {
+        location = TOP_RIGHT;
+    } else if (down == MPI_PROC_NULL && left == MPI_PROC_NULL) {
+        location = BOTTOM_LEFT;
+    } else if (down == MPI_PROC_NULL && right == MPI_PROC_NULL) {
+        location = BOTTOM_RIGHT;
+    } else if (up == MPI_PROC_NULL) {
+        location = TOP_EDGE;
+    } else if (down == MPI_PROC_NULL) {
+        location = BOTTOM_EDGE;
+    } else if (left == MPI_PROC_NULL) {
+        location = LEFT_EDGE;
+    } else if (right == MPI_PROC_NULL) {
+        location = RIGHT_EDGE;
+    }
+
+    return location;
+}
+
+/**
+ * Initialized grid based on its position inside topology
+ */
+std::vector<std::vector<double>>
+initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
+
+    int size_x = m + 2;
+    int size_y = n + 2;
+
+    std::vector<std::vector<double>> subgrid(n + 2,
+                                             std::vector<double>(m + 2, 0.0));
+
+    switch (location) {
+    case TOP_LEFT:
+    case LEFT_EDGE:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][1] = 20;
+        }
+        break;
+    case TOP_RIGHT:
+    case RIGHT_EDGE:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][size_x - 2] = 40;
+        }
+        break;
+    case BOTTOM_RIGHT:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][size_x - 2] = 40;
+        }
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case BOTTOM_LEFT:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][1] = 20;
+        }
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case BOTTOM_EDGE:
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case TOP_EDGE:
+    case INTERIOR:
+        break;
+    }
+
+    return subgrid;
+}
+
+void printMatrixBeautifully(const std::vector<std::vector<double>> &matrix) {
+    // Handle empty matrix
+    if (matrix.empty() || matrix[0].empty()) {
+        std::cout << "Empty matrix" << std::endl;
+        return;
+    }
+
+    // Find maximum width needed for each column
+    std::vector<size_t> colWidths(matrix[0].size(), 0);
+
+    for (const auto &row : matrix) {
+        for (size_t j = 0; j < row.size(); ++j) {
+            // Convert to string with precision of 4 decimal places
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(4) << row[j];
+            std::string numStr = oss.str();
+
+            // Remove trailing zeros and decimal point if it's a whole number
+            size_t lastNonZero = numStr.find_last_not_of('0');
+            if (lastNonZero != std::string::npos &&
+                numStr[lastNonZero] == '.') {
+                numStr = numStr.substr(0, lastNonZero);
+            } else if (lastNonZero != std::string::npos) {
+                numStr = numStr.substr(0, lastNonZero + 1);
+            }
+
+            colWidths[j] = std::max(colWidths[j], numStr.length());
+        }
+    }
+
+    // Print the matrix with proper spacing and borders
+    const std::string horizontalLine =
+        "┌" +
+        std::string(2 + std::accumulate(colWidths.begin(), colWidths.end(), 0) +
+                        (colWidths.size() - 1) * 3,
+                    '-') +
+        "┐";
+    std::cout << horizontalLine << std::endl;
+
+    for (size_t i = 0; i < matrix.size(); ++i) {
+        std::cout << "│ ";
+        for (size_t j = 0; j < matrix[i].size(); ++j) {
+            // Convert to string with precision of 4 decimal places
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(4) << matrix[i][j];
+            std::string numStr = oss.str();
+
+            // Remove trailing zeros and decimal point if it's a whole number
+            size_t lastNonZero = numStr.find_last_not_of('0');
+            if (lastNonZero != std::string::npos &&
+                numStr[lastNonZero] == '.') {
+                numStr = numStr.substr(0, lastNonZero);
+            } else if (lastNonZero != std::string::npos) {
+                numStr = numStr.substr(0, lastNonZero + 1);
+            }
+
+            std::cout << std::setw(colWidths[j]) << numStr;
+
+            // Add spacing between columns
+            if (j < matrix[i].size() - 1) {
+                std::cout << " | ";
+            }
+        }
+        std::cout << " │" << std::endl;
+    }
+
+    const std::string bottomLine =
+        "└" +
+        std::string(2 + std::accumulate(colWidths.begin(), colWidths.end(), 0) +
+                        (colWidths.size() - 1) * 3,
+                    '-') +
+        "┘";
+    std::cout << bottomLine << std::endl;
+}
+
 int main(int argc, char **argv) {
     int max_iterations = 2000;
     double epsilon = 1.0e-3;
 
-    // default values for M rows and N columns
-    int N = 42;
-    int M = 42;
+    // default values for N rows and M columns
+    int N = 6;
+    int M = 12;
 
     // size of 2D mesh - only used for your parallel version
-    int nx = 6, ny = 7;
+    int nx = 2, ny = 3;
 
-    process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
+    // process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
 
+    // Init & Boundary
     // Note that you need to initialize MPI first
-    int numprocs, rank;
-    int tag = 0;
+    int size;
 
     MPI_Init(&argc, &argv);
-    MPI_Comm_size(MPI_COMM_WORLD, &numprocs);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    MPI_Datatype row_type, col_type, col_matrix_type, row_2_type;
+    int dims[2] = {0, 0};
+    MPI_Dims_create(size, 2, dims);
 
-    MPI_Type_vector(1, 4, 4, MPI_DOUBLE, &row_type);
-    MPI_Type_vector(4, 1, 4, MPI_DOUBLE, &col_type);
-    MPI_Type_vector(1, 1, 1, MPI_DOUBLE, &row_2_type);
-    MPI_Type_create_hvector(4, 1, sizeof(double), col_type, &col_matrix_type);
+    int periods[2] = {false, false};
+    int reorder = 0;
 
-    MPI_Type_commit(&row_type);
-    MPI_Type_commit(&row_2_type);
-    MPI_Type_commit(&col_type);
-    MPI_Type_commit(&col_matrix_type);
+    MPI_Comm grid_comm;
+    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, reorder, &grid_comm);
 
-    if (rank == 0) {
-        double matrix[4][4] = {{00, 01, 02, 03},
-                               {10, 11, 12, 13},
-                               {20, 21, 22, 23},
-                               {30, 31, 32, 33}};
+    int rank;
+    MPI_Comm_rank(grid_comm, &rank);
 
-        MPI_Send(matrix, 4, row_2_type, 1, tag, MPI_COMM_WORLD);
-    } else if (rank == 1) {
-        double matrix[4][4] = {};
-        MPI_Status recv_status;
-        MPI_Recv(matrix, 1, col_matrix_type, 0, 0, MPI_COMM_WORLD,
-                 &recv_status);
-        print_double_array(matrix, 4, 4, 0);
-    }
+    int subgrid_coordinates[2];
+    MPI_Cart_coords(grid_comm, rank, 2, subgrid_coordinates);
+
+    // Get neighbor ranks
+    int left, right, up, down;
+    MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
+    MPI_Cart_shift(grid_comm, 0, 1, &up, &down);
+
+    // Get submatrix location
+    auto location = get_subgrid_location(up, down, left, right);
+
+    auto U = initialize_inside_grid(location, N / ny, M / nx);
+    auto W = initialize_inside_grid(location, N / ny, M / nx);
+    // End init
 
     /*
     auto time_compute_1 =
@@ -67,29 +234,6 @@ int main(int argc, char **argv) {
     int i, j;
     double diffnorm;
     int iteration_count = 0;
-
-    // You can also use Mat data struct (see helpers), in which case you
-    // allocate like: Mat U(M, N) and then use it like a regular 2D array
-
-    // TODO: use local sizes with MPI, i.e., recalculate M and N
-    auto U = Mat(M, N);
-    // TODO: same as with the U matrix
-    auto W = Mat(M, N);
-
-    // Init & Boundary
-    for (j = 0; j < M; ++j) {
-        for (i = 0; i < N; ++i) {
-            W[j][i] = U[j][i] = 0.0;
-        }
-
-        W[j][0] = U[j][0] = 20.0;
-        W[j][N - 1] = U[j][N - 1] = 40.0;
-    }
-
-    for (i = 0; i < N; ++i) {
-        W[M - 1][i] = U[M - 1][i] = 100.0;
-    }
-    // End init
 
     iteration_count = 0;
     do {
@@ -153,7 +297,6 @@ int main(int argc, char **argv) {
         << chrono::duration<double>(time_io_2 - time_io_1).count() +
                chrono::duration<double>(time_compute_2 - time_compute_1).count()
         << " seconds." << endl;
-
     */
 
     // do not forget to call MPI_Finalize()
