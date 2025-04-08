@@ -2,15 +2,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <format>
 #include <iostream>
-#include <iterator>
 #include <mpi.h>
 #include <numeric>
 
 #include "../include/a1-helpers.hpp"
-
-using namespace std;
 
 /**
  * Position of subgrid inside topology
@@ -57,14 +53,12 @@ SUBGRID_LOCATION get_subgrid_location(int up, int down, int left, int right) {
 /**
  * Initialized grid based on its position inside topology
  */
-std::vector<std::vector<double>>
-initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
+Mat initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
 
     int size_x = m + 2;
     int size_y = n + 2;
 
-    std::vector<std::vector<double>> subgrid(n + 2,
-                                             std::vector<double>(m + 2, 0.0));
+    Mat subgrid(n + 2, m + 2, 0);
 
     switch (location) {
     case TOP_LEFT:
@@ -105,81 +99,6 @@ initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
     return subgrid;
 }
 
-void printMatrixBeautifully(const std::vector<std::vector<double>> &matrix) {
-    // Handle empty matrix
-    if (matrix.empty() || matrix[0].empty()) {
-        std::cout << "Empty matrix" << std::endl;
-        return;
-    }
-
-    // Find maximum width needed for each column
-    std::vector<size_t> colWidths(matrix[0].size(), 0);
-
-    for (const auto &row : matrix) {
-        for (size_t j = 0; j < row.size(); ++j) {
-            // Convert to string with precision of 4 decimal places
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(4) << row[j];
-            std::string numStr = oss.str();
-
-            // Remove trailing zeros and decimal point if it's a whole number
-            size_t lastNonZero = numStr.find_last_not_of('0');
-            if (lastNonZero != std::string::npos &&
-                numStr[lastNonZero] == '.') {
-                numStr = numStr.substr(0, lastNonZero);
-            } else if (lastNonZero != std::string::npos) {
-                numStr = numStr.substr(0, lastNonZero + 1);
-            }
-
-            colWidths[j] = std::max(colWidths[j], numStr.length());
-        }
-    }
-
-    // Print the matrix with proper spacing and borders
-    const std::string horizontalLine =
-        "┌" +
-        std::string(2 + std::accumulate(colWidths.begin(), colWidths.end(), 0) +
-                        (colWidths.size() - 1) * 3,
-                    '-') +
-        "┐";
-    std::cout << horizontalLine << std::endl;
-
-    for (size_t i = 0; i < matrix.size(); ++i) {
-        std::cout << "│ ";
-        for (size_t j = 0; j < matrix[i].size(); ++j) {
-            // Convert to string with precision of 4 decimal places
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(4) << matrix[i][j];
-            std::string numStr = oss.str();
-
-            // Remove trailing zeros and decimal point if it's a whole number
-            size_t lastNonZero = numStr.find_last_not_of('0');
-            if (lastNonZero != std::string::npos &&
-                numStr[lastNonZero] == '.') {
-                numStr = numStr.substr(0, lastNonZero);
-            } else if (lastNonZero != std::string::npos) {
-                numStr = numStr.substr(0, lastNonZero + 1);
-            }
-
-            std::cout << std::setw(colWidths[j]) << numStr;
-
-            // Add spacing between columns
-            if (j < matrix[i].size() - 1) {
-                std::cout << " | ";
-            }
-        }
-        std::cout << " │" << std::endl;
-    }
-
-    const std::string bottomLine =
-        "└" +
-        std::string(2 + std::accumulate(colWidths.begin(), colWidths.end(), 0) +
-                        (colWidths.size() - 1) * 3,
-                    '-') +
-        "┘";
-    std::cout << bottomLine << std::endl;
-}
-
 int main(int argc, char **argv) {
     int max_iterations = 2000;
     double epsilon = 1.0e-3;
@@ -195,13 +114,13 @@ int main(int argc, char **argv) {
 
     // Init & Boundary
     // Note that you need to initialize MPI first
-    int size;
+    int comm_size;
 
     MPI_Init(&argc, &argv);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     int dims[2] = {0, 0};
-    MPI_Dims_create(size, 2, dims);
+    MPI_Dims_create(comm_size, 2, dims);
 
     int periods[2] = {false, false};
     int reorder = 0;
@@ -215,23 +134,55 @@ int main(int argc, char **argv) {
     int subgrid_coordinates[2];
     MPI_Cart_coords(grid_comm, rank, 2, subgrid_coordinates);
 
-    // Get neighbor ranks
     int left, right, up, down;
     MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
     MPI_Cart_shift(grid_comm, 0, 1, &up, &down);
 
-    // Get submatrix location
     auto location = get_subgrid_location(up, down, left, right);
 
-    auto U = initialize_inside_grid(location, N / ny, M / nx);
-    auto W = initialize_inside_grid(location, N / ny, M / nx);
+    // Size of subgrids
+    int dx, dy;
+    dx = M / nx;
+    dy = N / ny;
+
+    auto U = initialize_inside_grid(location, dy, dx);
+    auto W = initialize_inside_grid(location, dy, dx);
+
+    // Total size of subgrids (with halo regions)
+    int bx, by;
+    bx = dx + 2;
+    by = dy + 2;
+
+    auto size = bx * by;
+
+    // Subarray size
+    int global_size[] = {N, M};
+    int local_size[] = {dy, dx};
+    int global_start[] = {0, 0};
+
+    MPI_Datatype row_type, col_type;
+    MPI_Type_contiguous(dx, MPI_DOUBLE, &row_type);
+    MPI_Type_commit(&row_type);
+
+    MPI_Type_vector(dy, 1, bx, MPI_DOUBLE, &col_type);
+    MPI_Type_commit(&col_type);
+
+    MPI_Datatype subarray;
+    MPI_Type_create_subarray(2, global_size, local_size, global_start,
+                             MPI_ORDER_C, MPI_DOUBLE, &subarray);
+    MPI_Type_commit(&subarray);
+
+    MPI_Datatype matrix_row;
+    // Take every element except halo region (last element)
+    MPI_Type_vector(1, bx - 1, bx, MPI_DOUBLE, &matrix_row);
+
+    MPI_Win win;
+    MPI_Win_create(&U[0][0], sizeof(double) * size, sizeof(double),
+                   MPI_INFO_NULL, grid_comm, &win);
     // End init
 
-    /*
-    auto time_compute_1 =
-        chrono::high_resolution_clock::now(); // change to MPI_Wtime()
+    auto time_compute = MPI_Wtime(); // change to MPI_Wtime()
 
-    int i, j;
     double diffnorm;
     int iteration_count = 0;
 
@@ -240,66 +191,120 @@ int main(int argc, char **argv) {
         iteration_count++;
         diffnorm = 0.0;
 
-        // Compute new values (but not on boundary)
-        // you need to adjust for-loop start and end values
-        {
-            for (j = 1; j < M - 1; ++j) {
-                for (i = 1; i < N - 1; ++i) {
-                    W[j][i] = (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] +
-                               U[j - 1][i]) *
-                              0.25;
-                    diffnorm += (W[j][i] - U[j][i]) * (W[j][i] - U[j][i]);
-                }
-            }
-
-            // Only transfer the interior points
-            for (j = 1; j < M - 1; ++j)
-                for (i = 1; i < N - 1; ++i)
-                    U[j][i] = W[j][i];
+        // Halo exchange
+        MPI_Win_fence(0, win);
+        if (left != MPI_PROC_NULL) {
+            // End of the second row is the start of the halo region
+            MPI_Aint disp = 2 * bx - 1;
+            MPI_Put(&U[1][1], 1, col_type, left, disp, 1, col_type, win);
         }
 
-        diffnorm = sqrt(diffnorm); // all processes need to know when to stop
+        if (right != MPI_PROC_NULL) {
+            // Beginning of the second row is where the halo starts
+            MPI_Aint disp = bx;
+            MPI_Put(&U[1][dx], 1, col_type, right, disp, 1, col_type, win);
+        }
+
+        if (up != MPI_PROC_NULL) {
+            // Halo starts at the second element of the last row
+            MPI_Aint disp = (by - 1) * bx + 1;
+            MPI_Put(&U[1][1], 1, row_type, up, disp, 1, row_type, win);
+        }
+
+        if (down != MPI_PROC_NULL) {
+            // Halo starts at the second element of the firs row
+            MPI_Aint disp = 1;
+            MPI_Put(&U[dy][1], 1, row_type, down, disp, 1, row_type, win);
+        }
+        MPI_Win_fence(0, win);
+
+
+        int ccoords[2];
+        MPI_Cart_coords(grid_comm, rank, 2, ccoords);
+
+        // Compute new values (but not on boundary)
+        // you need to adjust for-loop start and end values
+        for (auto j = 1; j < by - 1; j++) {
+            for (auto i = 1; i < bx - 1; i++) {
+                W[j][i] =
+                    (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] + U[j - 1][i]) *
+                    0.25;
+                diffnorm += (W[j][i] - U[j][i]) * (W[j][i] - U[j][i]);
+            }
+        }
+
+        // Only transfer the interior points
+        for (auto j = 1; j < by - 1; ++j)
+            for (auto i = 1; i < bx - 1; ++i)
+                U[j][i] = W[j][i];
+
+        double global_diffnorm;
+        MPI_Allreduce(&diffnorm, &global_diffnorm, 1, MPI_DOUBLE, MPI_SUM,
+                      grid_comm);
+        diffnorm =
+            sqrt(global_diffnorm); // all processes need to know when to stop
     } while (epsilon <= diffnorm && iteration_count < max_iterations);
 
-    auto time_compute_2 =
-        chrono::high_resolution_clock::now(); // change to MPI_Wtime()
+    std::cout << U.to_string() << std::endl;
+    time_compute += MPI_Wtime();
 
     // TODO for MPI: collect all local parts of the U matrix, and save it to
     // another "big" matrix That has the same size the whole size: like
     // bigU(M,N) For verification use output data file
 
-    auto time_io_1 = chrono::high_resolution_clock::now();
+    /*
+    if (rank == 0) {
+        auto time_io_1 = std::chrono::high_resolution_clock::now();
 
-    std::ofstream ofs("heat-" + to_string(M) + "x" + to_string(N) + ".txt",
-                      std::ofstream::out);
-    ofs << N << "\n" << M << "\n";
+        std::vector<std::vector<double>> global_U(N,
+                                                  std::vector<double>(M, 0.0));
 
-    for (int j = 0; j < M; ++j) {
-        for (int i = 0; i < N; ++i) {
-            ofs << std::fixed << std::setfill(' ') << std::right
-                << std::setw(11) << setprecision(6) << U[j][i] << " ";
+        MPI_Gather(MPI_IN_PLACE, 1, subarray, global_U.data(), 1, subarray, 0,
+    grid_comm);
+
+        // Write data
+        std::ofstream ofs("heat-" + std::to_string(M) + "x" +
+                              std::to_string(N) + ".txt",
+                          std::ofstream::out);
+        ofs << N << "\n" << M << "\n";
+
+        for (int j = 0; j < M; ++j) {
+            for (int i = 0; i < N; ++i) {
+                ofs << std::fixed << std::setfill(' ') << std::right
+                    << std::setw(11) << std::setprecision(6) << global_U[j][i]
+                    << " ";
+            }
+            // ofs << "\n";
         }
-        // ofs << "\n";
+        ofs.close();
+
+        auto time_io_2 = std::chrono::high_resolution_clock::now();
+
+        // print time measurements
+        std::cout << std::format("Computed in {} iterations and {} seconds.",
+                                 iteration_count, time_compute)
+                  << std::endl;
+        std::cout
+            << "IO time: "
+            << std::chrono::duration<double>(time_io_2 - time_io_1).count()
+            << " seconds." << std::endl;
+        std::cout
+            << "Total time: "
+            << std::chrono::duration<double>(time_io_2 - time_io_1).count() +
+                   std::chrono::duration<double>(time_compute - time_compute)
+                       .count()
+            << " seconds." << std::endl;
+
+    } else {
+        MPI_Gather(&U[1][1], dy, matrix_row, nullptr, 0, MPI_DATATYPE_NULL, 0,
+    grid_comm);
     }
-    ofs.close();
-
-    auto time_io_2 = chrono::high_resolution_clock::now();
-
-    // print time measurements
-    cout << "Computed in " << iteration_count << " iterations and "
-         << chrono::duration<double>(time_compute_2 - time_compute_1).count()
-         << " seconds." << endl;
-    cout << "IO time: "
-         << chrono::duration<double>(time_io_2 - time_io_1).count()
-         << " seconds." << endl;
-    cout
-        << "Total time: "
-        << chrono::duration<double>(time_io_2 - time_io_1).count() +
-               chrono::duration<double>(time_compute_2 - time_compute_1).count()
-        << " seconds." << endl;
     */
 
     // do not forget to call MPI_Finalize()
+    MPI_Type_free(&row_type);
+    MPI_Type_free(&col_type);
+    MPI_Type_free(&subarray);
     MPI_Finalize();
 
     return EXIT_SUCCESS;
