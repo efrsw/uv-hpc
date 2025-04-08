@@ -4,7 +4,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <mpi.h>
-#include <numeric>
+#include <ostream>
+#include <vector>
 
 #include "../include/a1-helpers.hpp"
 
@@ -108,9 +109,9 @@ int main(int argc, char **argv) {
     int M = 12;
 
     // size of 2D mesh - only used for your parallel version
-    int nx = 2, ny = 3;
+    int nx = 3, ny = 3;
 
-    // process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
+    process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
 
     // Init & Boundary
     // Note that you need to initialize MPI first
@@ -153,13 +154,6 @@ int main(int argc, char **argv) {
     bx = dx + 2;
     by = dy + 2;
 
-    auto size = bx * by;
-
-    // Subarray size
-    int global_size[] = {N, M};
-    int local_size[] = {dy, dx};
-    int global_start[] = {0, 0};
-
     MPI_Datatype row_type, col_type;
     MPI_Type_contiguous(dx, MPI_DOUBLE, &row_type);
     MPI_Type_commit(&row_type);
@@ -167,17 +161,8 @@ int main(int argc, char **argv) {
     MPI_Type_vector(dy, 1, bx, MPI_DOUBLE, &col_type);
     MPI_Type_commit(&col_type);
 
-    MPI_Datatype subarray;
-    MPI_Type_create_subarray(2, global_size, local_size, global_start,
-                             MPI_ORDER_C, MPI_DOUBLE, &subarray);
-    MPI_Type_commit(&subarray);
-
-    MPI_Datatype matrix_row;
-    // Take every element except halo region (last element)
-    MPI_Type_vector(1, bx - 1, bx, MPI_DOUBLE, &matrix_row);
-
     MPI_Win win;
-    MPI_Win_create(&U[0][0], sizeof(double) * size, sizeof(double),
+    MPI_Win_create(&U[0][0], sizeof(double) * bx * by, sizeof(double),
                    MPI_INFO_NULL, grid_comm, &win);
     // End init
 
@@ -218,10 +203,6 @@ int main(int argc, char **argv) {
         }
         MPI_Win_fence(0, win);
 
-
-        int ccoords[2];
-        MPI_Cart_coords(grid_comm, rank, 2, ccoords);
-
         // Compute new values (but not on boundary)
         // you need to adjust for-loop start and end values
         for (auto j = 1; j < by - 1; j++) {
@@ -245,33 +226,89 @@ int main(int argc, char **argv) {
             sqrt(global_diffnorm); // all processes need to know when to stop
     } while (epsilon <= diffnorm && iteration_count < max_iterations);
 
-    std::cout << U.to_string() << std::endl;
     time_compute += MPI_Wtime();
 
     // TODO for MPI: collect all local parts of the U matrix, and save it to
     // another "big" matrix That has the same size the whole size: like
     // bigU(M,N) For verification use output data file
 
+    // Subarray size
+    int submatrix_total_size[] = {by, bx};
+    int submatrix_inner_size[] = {dy, dx};
+    int submatrix_inner_start[] = {1, 1};
+
+    MPI_Datatype submatrix_type;
+    MPI_Type_create_subarray(2, submatrix_total_size, submatrix_inner_size,
+                             submatrix_inner_start, MPI_ORDER_C, MPI_DOUBLE,
+                             &submatrix_type);
+    MPI_Type_commit(&submatrix_type);
+
+    // Global matrix size
+    int global_total_size[] = {N, M};
+    int global_inner_size[] = {dy, dx};
+    int global_inner_start[] = {0, 0};
+
+    MPI_Datatype global_matrix_type;
+    MPI_Type_create_subarray(2, global_total_size, global_inner_size,
+                             global_inner_start, MPI_ORDER_C, MPI_DOUBLE,
+                             &global_matrix_type);
+    MPI_Type_commit(&global_matrix_type);
+
+    MPI_Datatype global_matrix_resized;
+    MPI_Type_create_resized(global_matrix_type, 0, dx * sizeof(double),
+                            &global_matrix_resized);
+    MPI_Type_commit(&global_matrix_resized);
+
+    int ccoords[2];
+    MPI_Cart_coords(grid_comm, rank, 2, ccoords);
+
     /*
+     * I was thinking of it as of rows in the total grid. Since I made
+     * the extend of my type equal row size of submatrix, the following
+     * row starts just right after (n+1). Then, when we hit the grid
+     * limit, we need to jump by the amount of whole block, hence this
+     * weird plus.
+     */
+    int disp = ccoords[1] + (ccoords[0] * nx * dy);
+
+    std::cout << std::format("Row: {}, Col: {}, Disp: {}", ccoords[0],
+                             ccoords[1], disp)
+              << std::endl;
+
     if (rank == 0) {
         auto time_io_1 = std::chrono::high_resolution_clock::now();
+        std::vector<int> counts(comm_size);
+        std::vector<int> disps(comm_size);
 
-        std::vector<std::vector<double>> global_U(N,
-                                                  std::vector<double>(M, 0.0));
+        for (int i = 0; i < comm_size; i++) {
+            counts[i] = 1;
+        }
 
-        MPI_Gather(MPI_IN_PLACE, 1, subarray, global_U.data(), 1, subarray, 0,
-    grid_comm);
+        MPI_Gather(&disp, 1, MPI_INT, &disps[0], 1, MPI_INT, 0, grid_comm);
+
+        for(int i = 0; i < comm_size; i++) {
+            std::cout << disps[i] << " ";
+        }
+        std::cout << std::endl;
+
+
+        Mat global_U(N, M);
+
+        MPI_Gatherv(&U[0][0], 1, submatrix_type, &global_U[0][0], counts.data(),
+                    disps.data(), global_matrix_resized, 0, grid_comm);
 
         // Write data
-        std::ofstream ofs("heat-" + std::to_string(M) + "x" +
-                              std::to_string(N) + ".txt",
+
+        std::ofstream ofs("heat-" + std::to_string(N) + "x" +
+                              std::to_string(M) + ".txt",
                           std::ofstream::out);
         ofs << N << "\n" << M << "\n";
 
-        for (int j = 0; j < M; ++j) {
-            for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < M; ++i) {
                 ofs << std::fixed << std::setfill(' ') << std::right
-                    << std::setw(11) << std::setprecision(6) << global_U[j][i]
+                    << std::setw(11) << std::setprecision(6) <<
+                    global_U[j][i]
                     << " ";
             }
             // ofs << "\n";
@@ -296,15 +333,18 @@ int main(int argc, char **argv) {
             << " seconds." << std::endl;
 
     } else {
-        MPI_Gather(&U[1][1], dy, matrix_row, nullptr, 0, MPI_DATATYPE_NULL, 0,
-    grid_comm);
+        MPI_Gather(&disp, 1, MPI_INT, nullptr, 1, MPI_DATATYPE_NULL, 0,
+                   grid_comm);
+
+        MPI_Gatherv(&U[0][0], 1, submatrix_type, nullptr, nullptr, nullptr,
+                    MPI_DATATYPE_NULL, 0, grid_comm);
     }
-    */
 
     // do not forget to call MPI_Finalize()
     MPI_Type_free(&row_type);
     MPI_Type_free(&col_type);
-    MPI_Type_free(&subarray);
+    MPI_Type_free(&submatrix_type);
+    MPI_Type_free(&global_matrix_type);
     MPI_Finalize();
 
     return EXIT_SUCCESS;

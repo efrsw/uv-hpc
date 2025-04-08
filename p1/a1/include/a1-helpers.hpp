@@ -77,6 +77,8 @@ struct Mat {
     int height;
     int width;
 
+    Mat() {}
+
     Mat(int height, int width, const double &val = 0)
         : height(height), width(width), data(nullptr) {
         if (height > 0 && width > 0)
