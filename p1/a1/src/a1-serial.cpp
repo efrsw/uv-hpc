@@ -27,25 +27,37 @@ enum SUBGRID_LOCATION {
 SUBGRID_LOCATION get_subgrid_location(int up, int down, int left, int right) {
     SUBGRID_LOCATION location;
 
-    if (left != MPI_PROC_NULL && right != MPI_PROC_NULL &&
-        up != MPI_PROC_NULL && down != MPI_PROC_NULL) {
+    bool up_present = up != MPI_PROC_NULL;
+    bool down_present = down != MPI_PROC_NULL;
+    bool left_present = left != MPI_PROC_NULL;
+    bool right_present = right != MPI_PROC_NULL;
+
+    int total = up_present + down_present + left_present + right_present;
+
+    switch (total) {
+    case 2:
+        if (up_present && right_present)
+            location = BOTTOM_LEFT;
+        else if (up_present && left_present)
+            location = BOTTOM_RIGHT;
+        else if (down_present && left_present)
+            location = TOP_RIGHT;
+        else if (down_present && right_present)
+            location = TOP_LEFT;
+        break;
+    case 3:
+        if (!up_present)
+            location = TOP_EDGE;
+        else if (!down_present)
+            location = BOTTOM_EDGE;
+        else if (!right_present)
+            location = RIGHT_EDGE;
+        else if (!left_present)
+            location = LEFT_EDGE;
+        break;
+    case 4:
         location = INTERIOR;
-    } else if (up == MPI_PROC_NULL && left == MPI_PROC_NULL) {
-        location = TOP_LEFT;
-    } else if (up == MPI_PROC_NULL && right == MPI_PROC_NULL) {
-        location = TOP_RIGHT;
-    } else if (down == MPI_PROC_NULL && left == MPI_PROC_NULL) {
-        location = BOTTOM_LEFT;
-    } else if (down == MPI_PROC_NULL && right == MPI_PROC_NULL) {
-        location = BOTTOM_RIGHT;
-    } else if (up == MPI_PROC_NULL) {
-        location = TOP_EDGE;
-    } else if (down == MPI_PROC_NULL) {
-        location = BOTTOM_EDGE;
-    } else if (left == MPI_PROC_NULL) {
-        location = LEFT_EDGE;
-    } else if (right == MPI_PROC_NULL) {
-        location = RIGHT_EDGE;
+        break;
     }
 
     return location;
@@ -120,6 +132,15 @@ int main(int argc, char **argv) {
 
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+
+    if (comm_size != nx * ny) {
+        std::cout
+            << std::format(
+                   "This application is meant to be run with {} processes.",
+                   nx * ny)
+            << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
 
     int dims[2] = {0, 0};
     MPI_Dims_create(comm_size, 2, dims);
