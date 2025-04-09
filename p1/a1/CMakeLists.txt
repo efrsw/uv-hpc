@@ -31,7 +31,7 @@ if(OpenMP_FOUND)
 endif()
 
 # Create an executable target
-add_executable(a1_mpi src/a1-serial.cpp)
+add_executable(a1_mpi src/a1-mpi.cpp)
 
 # Link against MPI libraries using the imported target
 target_link_libraries(a1_mpi PRIVATE MPI::MPI_CXX)

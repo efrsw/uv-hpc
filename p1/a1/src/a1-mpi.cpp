@@ -1,0 +1,425 @@
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <mpi.h>
+#include <ostream>
+#include <vector>
+
+#include "../include/a1-helpers.hpp"
+
+/**
+ * Position of subgrid inside topology
+ */
+enum SUBGRID_LOCATION {
+    TOP_LEFT = 0,
+    TOP_EDGE = 1,
+    TOP_RIGHT = 2,
+    RIGHT_EDGE = 3,
+    BOTTOM_RIGHT = 4,
+    BOTTOM_EDGE = 5,
+    LEFT_EDGE = 6,
+    BOTTOM_LEFT = 7,
+    INTERIOR = 8
+};
+
+SUBGRID_LOCATION get_subgrid_location(int up, int down, int left, int right) {
+    SUBGRID_LOCATION location;
+
+    bool up_present = up != MPI_PROC_NULL;
+    bool down_present = down != MPI_PROC_NULL;
+    bool left_present = left != MPI_PROC_NULL;
+    bool right_present = right != MPI_PROC_NULL;
+
+    int total = up_present + down_present + left_present + right_present;
+
+    switch (total) {
+    case 2:
+        if (up_present && right_present)
+            location = BOTTOM_LEFT;
+        else if (up_present && left_present)
+            location = BOTTOM_RIGHT;
+        else if (down_present && left_present)
+            location = TOP_RIGHT;
+        else if (down_present && right_present)
+            location = TOP_LEFT;
+        break;
+    case 3:
+        if (!up_present)
+            location = TOP_EDGE;
+        else if (!down_present)
+            location = BOTTOM_EDGE;
+        else if (!right_present)
+            location = RIGHT_EDGE;
+        else if (!left_present)
+            location = LEFT_EDGE;
+        break;
+    case 4:
+        location = INTERIOR;
+        break;
+    }
+
+    return location;
+}
+
+/**
+ * Initialized grid based on its position inside topology
+ */
+Mat initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
+
+    int size_x = m + 2;
+    int size_y = n + 2;
+
+    Mat subgrid(n + 2, m + 2, 0);
+
+    // Fill the boundary
+    switch (location) {
+    case TOP_LEFT:
+    case LEFT_EDGE:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][1] = 20;
+        }
+        break;
+    case TOP_RIGHT:
+    case RIGHT_EDGE:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][size_x - 2] = 40;
+        }
+        break;
+    case BOTTOM_RIGHT:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][size_x - 2] = 40;
+        }
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case BOTTOM_LEFT:
+        for (auto i = 1; i < size_y - 1; i++) {
+            subgrid[i][1] = 20;
+        }
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case BOTTOM_EDGE:
+        std::fill(&subgrid[size_y - 2][1], &subgrid[size_y - 2][size_x - 1],
+                  100.0);
+        break;
+    case TOP_EDGE:
+    case INTERIOR:
+        break;
+    }
+
+    return subgrid;
+}
+
+int main(int argc, char **argv) {
+    int max_iterations = 2000;
+    double epsilon = 1.0e-3;
+
+    // default values for N rows and M columns
+    int N = 6;
+    int M = 12;
+
+    // size of 2D mesh - only used for your parallel version
+    int nx = 3, ny = 3;
+
+    process_input(argc, argv, N, M, nx, ny, max_iterations, epsilon);
+
+    // Init & Boundary
+    // Note that you need to initialize MPI first
+    int comm_size;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+
+    if (comm_size != nx * ny) {
+        std::cout
+            << std::format(
+                   "This application is meant to be run with {} processes.",
+                   nx * ny)
+            << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+    int dims[2] = {0, 0};
+    MPI_Dims_create(comm_size, 2, dims);
+
+    int periods[2] = {false, false};
+    int reorder = 0;
+
+    MPI_Comm grid_comm;
+    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, reorder, &grid_comm);
+
+    int rank;
+    MPI_Comm_rank(grid_comm, &rank);
+
+    int subgrid_coordinates[2];
+    MPI_Cart_coords(grid_comm, rank, 2, subgrid_coordinates);
+
+    int left, right, up, down;
+    MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
+    MPI_Cart_shift(grid_comm, 0, 1, &up, &down);
+
+    auto location = get_subgrid_location(up, down, left, right);
+
+    // Size of subgrids
+    int dx, dy;
+    dx = M / nx;
+    dy = N / ny;
+
+    auto U = initialize_inside_grid(location, dy, dx);
+    auto W = initialize_inside_grid(location, dy, dx);
+
+    // Total size of subgrids (with halo regions)
+    int bx, by;
+    bx = dx + 2;
+    by = dy + 2;
+
+    MPI_Datatype row_type, col_type;
+    MPI_Type_contiguous(dx, MPI_DOUBLE, &row_type);
+    MPI_Type_commit(&row_type);
+
+    MPI_Type_vector(dy, 1, bx, MPI_DOUBLE, &col_type);
+    MPI_Type_commit(&col_type);
+
+    MPI_Win win;
+    MPI_Win_create(&U[0][0], sizeof(double) * bx * by, sizeof(double),
+                   MPI_INFO_NULL, grid_comm, &win);
+    // End init
+
+    auto time_compute = MPI_Wtime(); // change to MPI_Wtime()
+
+    double diffnorm;
+    int iteration_count = 0;
+
+    iteration_count = 0;
+    do {
+        iteration_count++;
+        diffnorm = 0.0;
+
+        // Halo exchange
+        MPI_Win_fence(0, win);
+        if (left != MPI_PROC_NULL) {
+            // End of the second row is the start of the halo region
+            MPI_Aint disp = 2 * bx - 1;
+            MPI_Put(&U[1][1], 1, col_type, left, disp, 1, col_type, win);
+        }
+
+        if (right != MPI_PROC_NULL) {
+            // Beginning of the second row is where the halo starts
+            MPI_Aint disp = bx;
+            MPI_Put(&U[1][dx], 1, col_type, right, disp, 1, col_type, win);
+        }
+
+        if (up != MPI_PROC_NULL) {
+            // Halo starts at the second element of the last row
+            MPI_Aint disp = (by - 1) * bx + 1;
+            MPI_Put(&U[1][1], 1, row_type, up, disp, 1, row_type, win);
+        }
+
+        if (down != MPI_PROC_NULL) {
+            // Halo starts at the second element of the firs row
+            MPI_Aint disp = 1;
+            MPI_Put(&U[dy][1], 1, row_type, down, disp, 1, row_type, win);
+        }
+        MPI_Win_fence(0, win);
+
+        // Compute new values (but not on boundary)
+        // you need to adjust for-loop start and end values
+        int y_start, y_end, x_start, x_end;
+        switch (location) {
+        case TOP_LEFT:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case TOP_EDGE:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        case TOP_RIGHT:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case RIGHT_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case BOTTOM_RIGHT:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case BOTTOM_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        case LEFT_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case BOTTOM_LEFT:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case INTERIOR:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        }
+
+        for (auto j = y_start; j <= y_end; j++) {
+            for (auto i = x_start; i <= x_end; i++) {
+                W[j][i] =
+                    (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] + U[j - 1][i]) *
+                    0.25;
+                diffnorm += (W[j][i] - U[j][i]) * (W[j][i] - U[j][i]);
+            }
+        }
+
+        // Only transfer the interior points
+        for (auto j = 1; j < by - 1; ++j)
+            for (auto i = 1; i < bx - 1; ++i)
+                U[j][i] = W[j][i];
+
+        double global_diffnorm;
+        MPI_Allreduce(&diffnorm, &global_diffnorm, 1, MPI_DOUBLE, MPI_SUM,
+                      grid_comm);
+        diffnorm =
+            sqrt(global_diffnorm); // all processes need to know when to stop
+    } while (epsilon <= diffnorm && iteration_count < max_iterations);
+
+    time_compute += MPI_Wtime();
+
+    // TODO for MPI: collect all local parts of the U matrix, and save it to
+    // another "big" matrix That has the same size the whole size: like
+    // bigU(M,N) For verification use output data file
+
+    // Subarray size
+    int submatrix_total_size[] = {by, bx};
+    int submatrix_inner_size[] = {dy, dx};
+    int submatrix_inner_start[] = {1, 1};
+
+    MPI_Datatype submatrix_type;
+    MPI_Type_create_subarray(2, submatrix_total_size, submatrix_inner_size,
+                             submatrix_inner_start, MPI_ORDER_C, MPI_DOUBLE,
+                             &submatrix_type);
+    MPI_Type_commit(&submatrix_type);
+
+    // Global matrix size
+    int global_total_size[] = {N, M};
+    int global_inner_size[] = {dy, dx};
+    int global_inner_start[] = {0, 0};
+
+    MPI_Datatype global_matrix_type;
+    MPI_Type_create_subarray(2, global_total_size, global_inner_size,
+                             global_inner_start, MPI_ORDER_C, MPI_DOUBLE,
+                             &global_matrix_type);
+    MPI_Type_commit(&global_matrix_type);
+
+    MPI_Datatype global_matrix_resized;
+    MPI_Type_create_resized(global_matrix_type, 0, dx * sizeof(double),
+                            &global_matrix_resized);
+    MPI_Type_commit(&global_matrix_resized);
+
+    int ccoords[2];
+    MPI_Cart_coords(grid_comm, rank, 2, ccoords);
+
+    /*
+     * I was thinking of it as of rows in the total grid. Since I made
+     * the extend of my type equal row size of submatrix, the following
+     * row starts just right after (n+1). Then, when we hit the grid
+     * limit, we need to jump by the amount of whole block, hence this
+     * weird plus.
+     */
+    int disp = ccoords[1] + (ccoords[0] * nx * dy);
+
+    std::cout << std::format("row: {}, col: {}, disp: {}", ccoords[0],
+                             ccoords[1], disp)
+              << std::endl;
+
+    if (rank == 0) {
+        auto time_io_1 = std::chrono::high_resolution_clock::now();
+        std::vector<int> counts(comm_size);
+        std::vector<int> disps(comm_size);
+
+        for (int i = 0; i < comm_size; i++) {
+            counts[i] = 1;
+        }
+
+        MPI_Gather(&disp, 1, MPI_INT, &disps[0], 1, MPI_INT, 0, grid_comm);
+
+        Mat global_U(N, M);
+
+        MPI_Gatherv(&U[0][0], 1, submatrix_type, &global_U[0][0], counts.data(),
+                    disps.data(), global_matrix_resized, 0, grid_comm);
+
+        std::cout << global_U.to_string() << std::endl;
+        // Write data
+
+        std::ofstream ofs("heat-" + std::to_string(N) + "x" +
+                              std::to_string(M) + ".txt",
+                          std::ofstream::out);
+        ofs << N << "\n" << M << "\n";
+
+        for (int j = 0; j < N; ++j) {
+            for (int i = 0; i < M; ++i) {
+                ofs << std::fixed << std::setfill(' ') << std::right
+                    << std::setw(11) << std::setprecision(6) << global_U[j][i]
+                    << " ";
+            }
+            // ofs << "\n";
+        }
+        ofs.close();
+
+        auto time_io_2 = std::chrono::high_resolution_clock::now();
+
+        // print time measurements
+        std::cout << std::format("Computed in {} iterations and {} seconds.",
+                                 iteration_count, time_compute)
+                  << std::endl;
+        std::cout
+            << "IO time: "
+            << std::chrono::duration<double>(time_io_2 - time_io_1).count()
+            << " seconds." << std::endl;
+        std::cout
+            << "Total time: "
+            << std::chrono::duration<double>(time_io_2 - time_io_1).count() +
+                   std::chrono::duration<double>(time_compute - time_compute)
+                       .count()
+            << " seconds." << std::endl;
+
+    } else {
+        MPI_Gather(&disp, 1, MPI_INT, nullptr, 1, MPI_DATATYPE_NULL, 0,
+                   grid_comm);
+
+        MPI_Gatherv(&U[0][0], 1, submatrix_type, nullptr, nullptr, nullptr,
+                    MPI_DATATYPE_NULL, 0, grid_comm);
+    }
+
+    // do not forget to call MPI_Finalize()
+    MPI_Type_free(&row_type);
+    MPI_Type_free(&col_type);
+    MPI_Type_free(&submatrix_type);
+    MPI_Type_free(&global_matrix_type);
+    MPI_Finalize();
+
+    return EXIT_SUCCESS;
+}
