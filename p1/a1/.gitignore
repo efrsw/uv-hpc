@@ -49,3 +49,5 @@ build/
 *.out
 *.app
 
+# Output
+*.txt
