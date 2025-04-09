@@ -61,6 +61,7 @@ Mat initialize_inside_grid(SUBGRID_LOCATION location, int n, int m) {
 
     Mat subgrid(n + 2, m + 2, 0);
 
+    // Fill the boundary
     switch (location) {
     case TOP_LEFT:
     case LEFT_EDGE:
@@ -205,8 +206,66 @@ int main(int argc, char **argv) {
 
         // Compute new values (but not on boundary)
         // you need to adjust for-loop start and end values
-        for (auto j = 1; j < by - 1; j++) {
-            for (auto i = 1; i < bx - 1; i++) {
+        int y_start, y_end, x_start, x_end;
+        switch (location) {
+        case TOP_LEFT:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case TOP_EDGE:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        case TOP_RIGHT:
+            y_start = 2;    // Halo + boundary
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case RIGHT_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case BOTTOM_RIGHT:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 1;    // Halo
+            x_end = bx - 3; // Halo + boundary
+            break;
+        case BOTTOM_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        case LEFT_EDGE:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case BOTTOM_LEFT:
+            y_start = 1;    // Halo
+            y_end = by - 3; // Halo + boundary
+            x_start = 2;    // Halo + boundary
+            x_end = bx - 2; // Halo
+            break;
+        case INTERIOR:
+            y_start = 1;    // Halo
+            y_end = by - 2; // Halo
+            x_start = 1;    // Halo
+            x_end = bx - 2; // Halo
+            break;
+        }
+
+        for (auto j = y_start; j <= y_end; j++) {
+            for (auto i = x_start; i <= x_end; i++) {
                 W[j][i] =
                     (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] + U[j - 1][i]) *
                     0.25;
@@ -271,10 +330,6 @@ int main(int argc, char **argv) {
      */
     int disp = ccoords[1] + (ccoords[0] * nx * dy);
 
-    std::cout << std::format("Row: {}, Col: {}, Disp: {}", ccoords[0],
-                             ccoords[1], disp)
-              << std::endl;
-
     if (rank == 0) {
         auto time_io_1 = std::chrono::high_resolution_clock::now();
         std::vector<int> counts(comm_size);
@@ -286,17 +341,12 @@ int main(int argc, char **argv) {
 
         MPI_Gather(&disp, 1, MPI_INT, &disps[0], 1, MPI_INT, 0, grid_comm);
 
-        for(int i = 0; i < comm_size; i++) {
-            std::cout << disps[i] << " ";
-        }
-        std::cout << std::endl;
-
-
         Mat global_U(N, M);
 
         MPI_Gatherv(&U[0][0], 1, submatrix_type, &global_U[0][0], counts.data(),
                     disps.data(), global_matrix_resized, 0, grid_comm);
 
+        std::cout << global_U.to_string() << std::endl;
         // Write data
 
         std::ofstream ofs("heat-" + std::to_string(N) + "x" +
@@ -307,8 +357,7 @@ int main(int argc, char **argv) {
         for (int j = 0; j < N; ++j) {
             for (int i = 0; i < M; ++i) {
                 ofs << std::fixed << std::setfill(' ') << std::right
-                    << std::setw(11) << std::setprecision(6) <<
-                    global_U[j][i]
+                    << std::setw(11) << std::setprecision(6) << global_U[j][i]
                     << " ";
             }
             // ofs << "\n";
