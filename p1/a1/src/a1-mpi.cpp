@@ -134,11 +134,8 @@ int main(int argc, char **argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     if (comm_size != nx * ny) {
-        std::cout
-            << std::format(
-                   "This application is meant to be run with {} processes.",
-                   nx * ny)
-            << std::endl;
+        std::cout << "This application is meant to be run with " << nx * ny
+                  << " processes." << std::endl;
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
@@ -351,10 +348,6 @@ int main(int argc, char **argv) {
      */
     int disp = ccoords[1] + (ccoords[0] * nx * dy);
 
-    std::cout << std::format("row: {}, col: {}, disp: {}", ccoords[0],
-                             ccoords[1], disp)
-              << std::endl;
-
     if (rank == 0) {
         auto time_io_1 = std::chrono::high_resolution_clock::now();
         std::vector<int> counts(comm_size);
@@ -392,9 +385,8 @@ int main(int argc, char **argv) {
         auto time_io_2 = std::chrono::high_resolution_clock::now();
 
         // print time measurements
-        std::cout << std::format("Computed in {} iterations and {} seconds.",
-                                 iteration_count, time_compute)
-                  << std::endl;
+        std::cout << "Computed in " << iteration_count << " iterations and "
+                  << time_compute << " seconds." << std::endl;
         std::cout
             << "IO time: "
             << std::chrono::duration<double>(time_io_2 - time_io_1).count()
