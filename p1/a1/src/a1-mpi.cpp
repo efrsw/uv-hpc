@@ -25,6 +25,9 @@ enum SUBGRID_LOCATION {
     INTERIOR = 8
 };
 
+/**
+ * Get subgrid location type 
+ */
 SUBGRID_LOCATION get_subgrid_location(int up, int down, int left, int right) {
     SUBGRID_LOCATION location;
 
@@ -135,6 +138,7 @@ int main(int argc, char **argv) {
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
+    // Gracely terminate if the amount of procs are incorrect
     if (comm_size != nx * ny) {
         std::cout << "This application is meant to be run with " << nx * ny
                   << " processes." << std::endl;
@@ -153,10 +157,6 @@ int main(int argc, char **argv) {
     int rank;
     MPI_Comm_rank(grid_comm, &rank);
 
-    int subgrid_coordinates[2];
-    MPI_Cart_coords(grid_comm, rank, 2, subgrid_coordinates);
-
-    // Rank coordinates
     int rank_coordinates[2];
     MPI_Cart_coords(grid_comm, rank, 2, rank_coordinates);
 
@@ -299,6 +299,7 @@ int main(int argc, char **argv) {
             }
 
             // Only transfer the interior points
+            // Potentially a bottleneck, and swap should be used instead
 #pragma omp parallel for
             for (auto j = 1; j < by - 1; ++j)
                 for (auto i = 1; i < bx - 1; ++i)
