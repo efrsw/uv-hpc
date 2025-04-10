@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <mpi.h>
+#include <omp.h>
 #include <ostream>
 #include <vector>
 
@@ -130,7 +131,8 @@ int main(int argc, char **argv) {
     // Note that you need to initialize MPI first
     int comm_size;
 
-    MPI_Init(&argc, &argv);
+    int provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 
     if (comm_size != nx * ny) {
@@ -153,6 +155,10 @@ int main(int argc, char **argv) {
 
     int subgrid_coordinates[2];
     MPI_Cart_coords(grid_comm, rank, 2, subgrid_coordinates);
+
+    // Rank coordinates
+    int rank_coordinates[2];
+    MPI_Cart_coords(grid_comm, rank, 2, rank_coordinates);
 
     int left, right, up, down;
     MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
@@ -282,19 +288,21 @@ int main(int argc, char **argv) {
             break;
         }
 
-        for (auto j = y_start; j <= y_end; j++) {
-            for (auto i = x_start; i <= x_end; i++) {
-                W[j][i] =
-                    (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] + U[j - 1][i]) *
-                    0.25;
-                diffnorm += (W[j][i] - U[j][i]) * (W[j][i] - U[j][i]);
+#pragma omp parallel for reduction(+ : diffnorm)
+            for (auto j = y_start; j <= y_end; j++) {
+                for (auto i = x_start; i <= x_end; i++) {
+                    W[j][i] = (U[j][i + 1] + U[j][i - 1] + U[j + 1][i] +
+                               U[j - 1][i]) *
+                              0.25;
+                    diffnorm += (W[j][i] - U[j][i]) * (W[j][i] - U[j][i]);
+                }
             }
-        }
 
-        // Only transfer the interior points
-        for (auto j = 1; j < by - 1; ++j)
-            for (auto i = 1; i < bx - 1; ++i)
-                U[j][i] = W[j][i];
+            // Only transfer the interior points
+#pragma omp parallel for
+            for (auto j = 1; j < by - 1; ++j)
+                for (auto i = 1; i < bx - 1; ++i)
+                    U[j][i] = W[j][i];
 
         double global_diffnorm;
         MPI_Allreduce(&diffnorm, &global_diffnorm, 1, MPI_DOUBLE, MPI_SUM,
@@ -309,7 +317,7 @@ int main(int argc, char **argv) {
     // another "big" matrix That has the same size the whole size: like
     // bigU(M,N) For verification use output data file
 
-    // Subarray size
+    // Submatrix size to pass from node to root
     int submatrix_total_size[] = {by, bx};
     int submatrix_inner_size[] = {dy, dx};
     int submatrix_inner_start[] = {1, 1};
@@ -320,7 +328,7 @@ int main(int argc, char **argv) {
                              &submatrix_type);
     MPI_Type_commit(&submatrix_type);
 
-    // Global matrix size
+    // Global matrix size to receive on root
     int global_total_size[] = {N, M};
     int global_inner_size[] = {dy, dx};
     int global_inner_start[] = {0, 0};
@@ -331,22 +339,20 @@ int main(int argc, char **argv) {
                              &global_matrix_type);
     MPI_Type_commit(&global_matrix_type);
 
+    // Need to change the extent of the type, so the subgrids are properly
+    // placed.
     MPI_Datatype global_matrix_resized;
     MPI_Type_create_resized(global_matrix_type, 0, dx * sizeof(double),
                             &global_matrix_resized);
     MPI_Type_commit(&global_matrix_resized);
 
-    int ccoords[2];
-    MPI_Cart_coords(grid_comm, rank, 2, ccoords);
-
     /*
      * I was thinking of it as of rows in the total grid. Since I made
-     * the extend of my type equal row size of submatrix, the following
+     * the extent of my type equal row size of submatrix, the following
      * row starts just right after (n+1). Then, when we hit the grid
-     * limit, we need to jump by the amount of whole block, hence this
-     * weird plus.
+     * limit, we need to jump by the amount of whole block.
      */
-    int disp = ccoords[1] + (ccoords[0] * nx * dy);
+    int disp = rank_coordinates[1] + (rank_coordinates[0] * nx * dy);
 
     if (rank == 0) {
         auto time_io_1 = std::chrono::high_resolution_clock::now();
@@ -357,16 +363,16 @@ int main(int argc, char **argv) {
             counts[i] = 1;
         }
 
+        // Gather array of displacements
         MPI_Gather(&disp, 1, MPI_INT, &disps[0], 1, MPI_INT, 0, grid_comm);
 
         Mat global_U(N, M);
 
+        // Gather submatrix data on the root rank
         MPI_Gatherv(&U[0][0], 1, submatrix_type, &global_U[0][0], counts.data(),
                     disps.data(), global_matrix_resized, 0, grid_comm);
 
-        std::cout << global_U.to_string() << std::endl;
         // Write data
-
         std::ofstream ofs("heat-" + std::to_string(N) + "x" +
                               std::to_string(M) + ".txt",
                           std::ofstream::out);
@@ -394,14 +400,15 @@ int main(int argc, char **argv) {
         std::cout
             << "Total time: "
             << std::chrono::duration<double>(time_io_2 - time_io_1).count() +
-                   std::chrono::duration<double>(time_compute - time_compute)
-                       .count()
+                   time_compute
             << " seconds." << std::endl;
 
     } else {
+        // Send info about displacement
         MPI_Gather(&disp, 1, MPI_INT, nullptr, 1, MPI_DATATYPE_NULL, 0,
                    grid_comm);
 
+        // Send the inner data of submatrix
         MPI_Gatherv(&U[0][0], 1, submatrix_type, nullptr, nullptr, nullptr,
                     MPI_DATATYPE_NULL, 0, grid_comm);
     }
