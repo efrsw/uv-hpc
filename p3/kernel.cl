@@ -1,8 +1,6 @@
 __kernel void compute(__global const int* changes, __global int* account,
                       __global int* sum, int clients, int periods) {
-  // TODO insert your code here
-  int i = get_global_id(0);  // client index
-
+  int i = get_global_id(0);
   if (i >= clients) return;
 
   // copy first period as is
