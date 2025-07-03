@@ -3,7 +3,6 @@ __kernel void compute(__global const int* changes, __global int* account,
   int i = get_global_id(0);
   if (i >= clients) return;
 
-  // copy first period as is
   account[i] = changes[i];
   atomic_add(&sum[0], account[i]);
 
@@ -12,7 +11,6 @@ __kernel void compute(__global const int* changes, __global int* account,
     int prev_idx = (j - 1) * clients + i;
     account[idx] = account[prev_idx] + changes[idx];
 
-    // update sum for the period
     atomic_add(&sum[j], account[idx]);
   }
 }
